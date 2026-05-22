@@ -1,0 +1,23 @@
+<p>
+  <label>Kimi Host:</label>
+  <%= text_field_tag 'settings[kimi_host]', @settings['kimi_host'], size: 30 %>
+</p>
+<p>
+  <label>Kimi Port:</label>
+  <%= text_field_tag 'settings[kimi_port]', @settings['kimi_port'], size: 10 %>
+</p>
+<p>
+  <label>Auth Token (необязательно):</label>
+  <%= text_field_tag 'settings[kimi_token]', @settings['kimi_token'], size: 40 %>
+</p>
+<p>
+  <label>Work Dir по умолчанию:</label>
+  <%= text_field_tag 'settings[work_dir]', @settings['work_dir'], size: 60,
+        placeholder: '/home/user/projects' %>
+</p>
+<p>
+  <label>
+    <%= check_box_tag 'settings[auto_close]', '1', @settings['auto_close'] == '1' %>
+    Автоматически закрывать задачу после успешного выполнения
+  </label>
+</p>

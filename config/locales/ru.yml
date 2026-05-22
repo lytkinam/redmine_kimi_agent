@@ -1,0 +1,7 @@
+ru:
+  kimi_error_no_session: "Не удалось создать сессию Kimi. Проверьте что kimi web запущен."
+  kimi_task_started: "Задача отправлена агенту (сессия %{session_id}…). Результат появится в комментариях."
+  kimi_task_cancelled: "Сессия отменена."
+  permission_use_kimi_agent: "Использовать Kimi Agent"
+  permission_manage_kimi_agent: "Управлять Kimi Agent (отмена, история)"
+  project_module_kimi_agent: "Kimi Agent"

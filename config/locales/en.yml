@@ -1,0 +1,7 @@
+en:
+  kimi_error_no_session: "Failed to create Kimi session. Make sure 'kimi web' is running."
+  kimi_task_started: "Task sent to agent (session %{session_id}…). Result will appear in comments."
+  kimi_task_cancelled: "Session cancelled."
+  permission_use_kimi_agent: "Use Kimi Agent"
+  permission_manage_kimi_agent: "Manage Kimi Agent (cancel, history)"
+  project_module_kimi_agent: "Kimi Agent"
