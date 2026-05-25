@@ -1,15 +1,22 @@
-<h2>🤖 Kimi Agent — <%= @issue.subject.truncate(60) %></h2>
+<h2>🤖 Kimi Agent — полный интерфейс</h2>
+<h3><%= @issue.subject.truncate(60) %> (#<%= @issue.id %>)</h3>
 
 <% unless @healthy %>
   <div class="flash warning">
-    ⚠️ Kimi Code CLI недоступен (<code>127.0.0.1:<%= Setting.plugin_redmine_kimi_agent['kimi_port'] %></code>).
+    ⚠️ Kimi Code CLI недоступен (<code><%= Setting.plugin_redmine_kimi_agent['kimi_host'] %>:<%= Setting.plugin_redmine_kimi_agent['kimi_port'] %></code>).
     Убедитесь, что сервер запущен: <code>kimi web</code>
   </div>
 <% end %>
 
-<div class="box" style="margin-bottom:1em">
-  <h3 style="margin-top:0">Запустить агента для задачи #<%= @issue.id %></h3>
+<% cf_session = @issue.custom_field_value(@kimi_session_cf).presence rescue nil %>
+<% if cf_session.present? %>
+  <div class="flash notice">
+    🔗 Активная сессия в задаче: <code><%= cf_session.truncate(12) %></code>
+  </div>
+<% end %>
 
+<div class="box" style="margin-bottom:1em">
+  <h4 style="margin-top:0">Управление сессией</h4>
   <%= form_tag({action: :execute}, method: :post) do %>
     <p>
       <label>Рабочая директория (work_dir):</label><br>
@@ -18,20 +25,26 @@
             size: 60, placeholder: '/home/user/projects/my-project' %>
     </p>
     <p>
-      <label>Дополнительные инструкции (опционально):</label><br>
-      <%= text_area_tag :extra_instructions, '', rows: 3, cols: 80,
-            placeholder: 'Используй TypeScript. Не изменяй тесты.' %>
-    </p>
-    <p>
       <%= submit_tag '▶ Запустить', class: 'button-positive',
             disabled: !@healthy,
             data: { confirm: 'Запустить Kimi агента для этой задачи?' } %>
+      <% if cf_session.present? %>
+        <%= link_to '🔄 Продолжить', { action: :resume }, method: :post, class: 'button' %>
+        <%= link_to '⛔ Стоп', { action: :stop }, method: :post, class: 'button', data: { confirm: 'Остановить сессию?' } %>
+        <%= link_to '🔁 Перезапустить', { action: :restart }, method: :post, class: 'button', data: { confirm: 'Сбросить и запустить новую сессию?' } %>
+        <%= link_to '🗑️ Сбросить', { action: :reset }, method: :delete, class: 'button', data: { confirm: 'Очистить session_id из задачи?' } %>
+      <% end %>
+      <% last_session = @sessions.first %>
+      <% if last_session && %w[error stopped].include?(last_session.status) %>
+        <%= link_to '📤 Эскалировать менеджеру', { action: :escalate }, method: :post, class: 'button', style: 'background:#fff3cd; color:#856404; border-color:#ffc107', data: { confirm: 'Эскалировать задачу менеджеру?' } %>
+      <% end %>
+      <%= link_to '🔄 Синхронизировать', { action: :sync }, method: :post, class: 'button' %>
     </p>
   <% end %>
 
   <details style="margin-top:1em">
     <summary style="cursor:pointer; color:#666">📋 Промпт который будет отправлен агенту</summary>
-    <pre style="background:#f5f5f5; padding:1em; font-size:0.85em; max-height:300px; overflow:auto"><%= h KimiAgentController.new.send(:build_prompt, @issue) rescue '...' %></pre>
+    <pre style="background:#f5f5f5; padding:1em; font-size:0.85em; max-height:300px; overflow:auto"><%= h @preview_prompt %></pre>
   </details>
 </div>
 
@@ -67,18 +80,19 @@
                     data: { confirm: 'Отменить сессию?' } %>
             <% end %>
             <a href="#" onclick="toggleLog(<%= s.id %>); return false">📄 Лог</a>
+            <%= link_to '⬇️ Скачать', { action: :download_log, id: s.id } %>
           </td>
         </tr>
         <tr id="kimi-log-<%= s.id %>" style="display:none">
           <td colspan="5">
-            <pre class="kimi-log" id="kimi-log-content-<%= s.id %>" style="background:#1e1e1e; color:#d4d4d4; padding:1em; max-height:400px; overflow:auto; font-size:0.8em; border-radius:4px"><%= h s.result_log.is_a?(Array) ? s.result_log.join : s.result_log.to_s %></pre>
+            <pre class="kimi-log" id="kimi-log-content-<%= s.id %>" style="background:#1e1e1e; color:#d4d4d4; padding:1em; max-height:400px; overflow:auto; font-size:0.8em; border-radius:4px"><%= h s.result_log.to_s %></pre>
           </td>
         </tr>
       <% end %>
     </tbody>
   </table>
 <% else %>
-  <p class="nodata">Сессий пока нет. Запустите агента выше.</p>
+  <p class="nodata">Сессий пока нет. Запустите агента из sidebar задачи.</p>
 <% end %>
 
 <style>
@@ -86,6 +100,7 @@
 .kimi-status-running { color: #e67e00; font-weight: bold }
 .kimi-status-error   { color: #c0392b; font-weight: bold }
 .kimi-status-pending { color: #888 }
+.kimi-status-stopped { color: #888; font-weight: bold }
 </style>
 
 <script>
@@ -107,10 +122,9 @@ document.addEventListener('DOMContentLoaded', function() {
           el.textContent = data.status;
           var logEl = document.getElementById('kimi-log-content-' + dbId);
           if (logEl && data.result_log) {
-            logEl.textContent = Array.isArray(data.result_log)
-              ? data.result_log.join('') : data.result_log;
+            logEl.textContent = data.result_log;
           }
-          if (['done', 'idle', 'error'].includes(data.status)) {
+          if (['done', 'idle', 'error', 'stopped'].includes(data.status)) {
             clearInterval(interval);
           }
         });

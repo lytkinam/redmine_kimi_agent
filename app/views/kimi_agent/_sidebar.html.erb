@@ -1,0 +1,105 @@
+<% if controller_name == 'issues' && @issue&.persisted? && User.current.allowed_to?(:use_kimi_agent, @project) %>
+  <div id="kimi-agent-sidebar" class="box">
+    <h3 style="margin-top:0; cursor:pointer" onclick="toggleKimiSidebar()">
+      🤖 Kimi Agent
+      <span id="kimi-toggle-icon" style="float:right">▼</span>
+    </h3>
+
+    <div id="kimi-sidebar-content">
+      <% client = KimiWebClient.new %>
+      <% healthy = begin; client.health['status'] == 'ok'; rescue; false; end %>
+      <% cf_id = (Setting.plugin_redmine_kimi_agent['kimi_session_cf_id'] || '14').to_i %>
+      <% cf_session = @issue.custom_field_value(cf_id).presence rescue nil %>
+
+      <% unless healthy %>
+        <div class="flash warning" style="font-size:0.85em; margin-bottom:0.5em">
+          ⚠️ Kimi CLI недоступен
+        </div>
+      <% end %>
+
+      <%= form_tag({ controller: 'kimi_agent', action: :execute, project_id: @project.identifier, issue_id: @issue.id }, method: :post) do %>
+        <p style="margin:0.3em 0">
+          <label style="font-size:0.85em">Work dir:</label><br>
+          <%= text_field_tag :work_dir, Setting.plugin_redmine_kimi_agent['work_dir'], size: 20, style: 'width:95%' %>
+        </p>
+        <p style="margin:0.5em 0 0 0">
+          <%= submit_tag '▶ Запустить', class: 'button-small', disabled: !healthy, style: 'width:100%' %>
+        </p>
+      <% end %>
+
+      <div class="kimi-agent-actions" style="margin-top:0.5em">
+        <% if cf_session.present? %>
+          <%= link_to '🔄 Продолжить', { controller: 'kimi_agent', action: :resume, project_id: @project.identifier, issue_id: @issue.id }, method: :post, class: 'button-small', style: 'display:block; margin-bottom:3px; text-align:center' %>
+          <%= link_to '⛔ Стоп', { controller: 'kimi_agent', action: :stop, project_id: @project.identifier, issue_id: @issue.id }, method: :post, class: 'button-small', style: 'display:block; margin-bottom:3px; text-align:center' %>
+          <%= link_to '🔁 Перезапустить', { controller: 'kimi_agent', action: :restart, project_id: @project.identifier, issue_id: @issue.id }, method: :post, class: 'button-small', style: 'display:block; margin-bottom:3px; text-align:center' %>
+          <%= link_to '🗑️ Сбросить', { controller: 'kimi_agent', action: :reset, project_id: @project.identifier, issue_id: @issue.id }, method: :delete, class: 'button-small', style: 'display:block; margin-bottom:3px; text-align:center' %>
+        <% end %>
+        <% last_session = KimiSession.for_issue(@issue.id).first %>
+        <% if last_session && %w[error stopped].include?(last_session.status) %>
+          <%= link_to '📤 Эскалировать', { controller: 'kimi_agent', action: :escalate, project_id: @project.identifier, issue_id: @issue.id }, method: :post, class: 'button-small', style: 'display:block; margin-bottom:3px; text-align:center; background:#fff3cd; color:#856404; border-color:#ffc107' %>
+        <% end %>
+        <%= link_to '🔄 Синхронизировать', { controller: 'kimi_agent', action: :sync, project_id: @project.identifier, issue_id: @issue.id }, method: :post, class: 'button-small', style: 'display:block; text-align:center' %>
+      </div>
+
+      <% if cf_session.present? %>
+        <p style="margin-top:0.5em; font-size:0.8em; color:#666; word-break:break-all">
+          Сессия: <code><%= cf_session.truncate(12) %></code>
+        </p>
+      <% end %>
+
+      <% sessions = KimiSession.for_issue(@issue.id).limit(5) %>
+      <% if sessions.any? %>
+        <details style="margin-top:0.5em">
+          <summary style="cursor:pointer; font-size:0.85em">📋 История (<%= sessions.count %>)</summary>
+          <ul style="font-size:0.8em; padding-left:1em; margin-top:0.3em; list-style:none">
+            <% sessions.each do |s| %>
+              <li style="margin-bottom:0.3em">
+                <% icon = { 'done' => '✅', 'running' => '⏳', 'error' => '❌', 'pending' => '🕐', 'idle' => '💤', 'stopped' => '🛑' }.fetch(s.status, '❓') %><%= icon %> <%= s.status %>
+                <% if s.result_log.present? %>
+                  <a href="#" onclick="toggleKimiLog(<%= s.id %>); return false" style="font-size:0.9em">лог</a>
+                  <div id="kimi-mini-log-<%= s.id %>" style="display:none; background:#1e1e1e; color:#d4d4d4; padding:0.5em; max-height:100px; overflow:auto; font-size:0.75em; margin-top:2px; border-radius:3px">
+                    <%= h s.result_log.to_s.truncate(500) %>
+                  </div>
+                <% end %>
+              </li>
+            <% end %>
+          </ul>
+          <p style="margin-top:0.3em; font-size:0.8em">
+            <%= link_to 'Полный интерфейс →', { controller: 'kimi_agent', action: :show, project_id: @project.identifier, issue_id: @issue.id } %>
+          </p>
+        </details>
+      <% end %>
+    </div>
+  </div>
+
+  <script>
+  document.addEventListener('DOMContentLoaded', function() {
+    var sidebar = document.getElementById('kimi-agent-sidebar');
+    var wrapper = document.getElementById('sidebar-wrapper');
+    var aihelper = document.getElementById('aihelper-sidebar');
+    if (sidebar && wrapper) {
+      if (aihelper && aihelper.parentNode === wrapper) {
+        wrapper.insertBefore(sidebar, aihelper.nextSibling);
+      } else {
+        wrapper.appendChild(sidebar);
+      }
+    }
+  });
+
+  function toggleKimiSidebar() {
+    var content = document.getElementById('kimi-sidebar-content');
+    var icon = document.getElementById('kimi-toggle-icon');
+    if (content.style.display === 'none') {
+      content.style.display = 'block';
+      icon.textContent = '▼';
+    } else {
+      content.style.display = 'none';
+      icon.textContent = '▶';
+    }
+  }
+  function toggleKimiLog(id) {
+    var el = document.getElementById('kimi-mini-log-' + id);
+    el.style.display = el.style.display === 'none' ? 'block' : 'none';
+  }
+  </script>
+<% end %>

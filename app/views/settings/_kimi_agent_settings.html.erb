@@ -16,8 +16,41 @@
         placeholder: '/home/user/projects' %>
 </p>
 <p>
+  <label>ID настраиваемого поля kimi_session_id:</label>
+  <%= text_field_tag 'settings[kimi_session_cf_id]', @settings['kimi_session_cf_id'], size: 10 %>
+</p>
+<p>
+  <label>Таймаут WebSocket (сек):</label>
+  <%= text_field_tag 'settings[timeout]', @settings['timeout'], size: 10 %>
+</p>
+<p>
+  <label>Лимит обрезки лога (символов):</label>
+  <%= text_field_tag 'settings[truncate_limit]', @settings['truncate_limit'], size: 10 %>
+</p>
+<p>
+  <label>ID статуса для авто-закрытия (пусто = первый закрытый):</label>
+  <%= text_field_tag 'settings[auto_close_status_id]', @settings['auto_close_status_id'], size: 10 %>
+</p>
+<p>
+  <label>
+    <%= check_box_tag 'settings[add_issue_note_enabled]', '1', @settings['add_issue_note_enabled'] == '1' %>
+    Писать результаты в комментарий задачи
+  </label>
+</p>
+<p>
   <label>
     <%= check_box_tag 'settings[auto_close]', '1', @settings['auto_close'] == '1' %>
     Автоматически закрывать задачу после успешного выполнения
   </label>
+</p>
+
+<hr>
+<h3>Skills & Credentials (для агента)</h3>
+<p>
+  <label>Путь к credentials.yaml (на хосте, для Kimi):</label>
+  <%= text_field_tag 'settings[credentials_yaml_path]', @settings['credentials_yaml_path'], size: 60 %>
+</p>
+<p>
+  <label>Путь к credentials.yaml (внутри контейнера, для плагина):</label>
+  <%= text_field_tag 'settings[credentials_yaml_container_path]', @settings['credentials_yaml_container_path'], size: 60 %>
 </p>

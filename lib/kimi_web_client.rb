@@ -4,16 +4,22 @@ require 'uri'
 require 'websocket'
 require 'socket'
 require 'securerandom'
-require 'open3'
+
+# Custom errors ---------------------------------------------------------------
+class KimiSessionStuckError < StandardError; end
+class KimiWebClientError   < StandardError; end
 
 # Client for Kimi Code CLI Web Interface (local uvicorn on 127.0.0.1:5494)
 class KimiWebClient
+  STUCK_TIMEOUT = 900   # 15 minutes without new text = stuck
+  MAX_RETRIES   = 2     # create new session + retry this many times
+
   attr_reader :host, :port, :token
 
   def initialize(host: nil, port: nil, token: nil)
     settings   = Setting.plugin_redmine_kimi_agent rescue {}
-    @host  = host  || settings['kimi_host']  || '127.0.0.1'
-    @port  = (port || settings['kimi_port']  || 5494).to_i
+    @host  = host  || settings['kimi_host']  || ENV.fetch('KIMI_WEB_HOST', '127.0.0.1')
+    @port  = (port || settings['kimi_port']  || ENV.fetch('KIMI_WEB_PORT', '5495')).to_i
     @token = token || settings['kimi_token'] || ''
   end
 
@@ -41,22 +47,18 @@ class KimiWebClient
     rest_delete("/api/sessions/#{session_id}")
   end
 
-  # ─── WebSocket prompt (sync, with Open3 python fallback) ──────────────────
+  # ─── Low-level prompt (sync, one shot) ────────────────────────────────────
 
-  # Yields text chunks as they arrive.
-  # Returns final accumulated text.
   def prompt(session_id, text, timeout: 120, &on_chunk)
-    ws_prompt_ruby(session_id, text, timeout: timeout, &on_chunk)
-  rescue => e
-    Rails.logger.warn "[KimiWebClient] Ruby WS failed (#{e.class}: #{e.message}), falling back to Python"
-    python_prompt(session_id, text, timeout: timeout, &on_chunk)
+    run_single_prompt(session_id, text, timeout: timeout, &on_chunk)
   end
-
-  # ─── Ruby WebSocket implementation ────────────────────────────────────────
 
   private
 
-  def ws_prompt_ruby(session_id, text, timeout:, &on_chunk)
+  # ---------------------------------------------------------------------------
+  # WebSocket single-prompt runner
+  # ---------------------------------------------------------------------------
+  def run_single_prompt(session_id, text, timeout:, &on_chunk)
     url = "ws://#{@host}:#{@port}/api/sessions/#{session_id}/stream"
     url += "?token=#{@token}" if @token.present?
 
@@ -75,8 +77,12 @@ class KimiWebClient
     incoming       = WebSocket::Frame::Incoming::Client.new(version: handshake.version)
     history_done   = false
     prompt_sent    = false
+    turn_began     = false
+    turn_began_at  = nil
     accumulated    = +''
     deadline       = Time.now + timeout
+    last_chunk_at  = Time.now
+    afk_phase      = text == '/afk'   # true when we are only kicking AFK mode
 
     send_rpc = ->(method, params = nil, id: SecureRandom.uuid) {
       msg = { jsonrpc: '2.0', method: method, id: id }
@@ -85,9 +91,17 @@ class KimiWebClient
         version: handshake.version, data: JSON.generate(msg), type: :text
       )
       sock.write(frame.to_s)
+      sock.flush
     }
 
     loop do
+      # --- stuck detection ---------------------------------------------------
+      if (Time.now - last_chunk_at) > STUCK_TIMEOUT
+        sock.close rescue nil
+        raise KimiSessionStuckError,
+              "No new text for #{STUCK_TIMEOUT}s (last at #{last_chunk_at})"
+      end
+
       raise "KimiWebClient timeout (#{timeout}s)" if Time.now > deadline
 
       raw = sock.read_nonblock(4096) rescue nil
@@ -110,11 +124,16 @@ class KimiWebClient
             unless prompt_sent
               send_rpc.call('prompt', { user_input: text })
               prompt_sent = true
+              turn_began = false     # reset: wait for TurnBegin of THIS prompt
+              accumulated = +''      # discard history text, collect only THIS prompt
             end
 
           when 'session_status'
             state = data.dig('params', 'state')
-            if prompt_sent && %w[idle stopped error].include?(state)
+            # Ignore stale session_status that arrives right after TurnBegin.
+            # Wait at least 2 seconds after TurnBegin before accepting idle.
+            just_turned = turn_began_at && (Time.now - turn_began_at) < 2.0
+            if prompt_sent && (afk_phase || turn_began) && !just_turned && %w[idle stopped error].include?(state)
               sock.close rescue nil
               return accumulated
             end
@@ -122,10 +141,34 @@ class KimiWebClient
           when 'event'
             etype   = data.dig('params', 'type')
             payload = data.dig('params', 'payload') || {}
+            if etype == 'TurnBegin'
+              turn_began = true
+              turn_began_at = Time.now
+            end
+            # ContentPart carries actual text chunks (including think blocks)
+            if etype == 'ContentPart' && payload['type'] == 'text'
+              chunk = payload['text'].to_s
+              unless chunk.empty?
+                accumulated << chunk
+                last_chunk_at = Time.now
+                on_chunk&.call(chunk)
+              end
+            end
+            # Collect think blocks so result_log is never empty when the model only thinks
+            if etype == 'ContentPart' && payload['type'] == 'think'
+              chunk = payload['think'].to_s
+              unless chunk.empty?
+                accumulated << chunk
+                last_chunk_at = Time.now
+                on_chunk&.call(chunk)
+              end
+            end
+            # Legacy fallbacks
             if %w[agent_text agent_response].include?(etype)
               chunk = payload['text'].to_s
               unless chunk.empty?
                 accumulated << chunk
+                last_chunk_at = Time.now
                 on_chunk&.call(chunk)
               end
             end
@@ -134,6 +177,8 @@ class KimiWebClient
             req_id   = data['id']
             req_type = data.dig('params', 'type')
             if req_type == 'ApprovalRequest'
+              # Auto-approve any lingering approval requests.
+              # In AFK mode these should not appear, but keep as safety-net.
               frame = WebSocket::Frame::Outgoing::Client.new(
                 version: handshake.version,
                 data: JSON.generate({ jsonrpc: '2.0', id: req_id, result: { approved: true } }),
@@ -158,26 +203,10 @@ class KimiWebClient
     sock&.close rescue nil
   end
 
-  def python_prompt(session_id, text, timeout:, &on_chunk)
-    script  = Rails.root.join('plugins', 'redmine_kimi_agent', 'lib', 'scripts', 'kimi-web-ws.py').to_s
-    script  = File.exist?(script) ? script : 'kimi-web-ws.py'
-    env     = {
-      'KIMI_WEB_HOST'  => @host,
-      'KIMI_WEB_PORT'  => @port.to_s,
-      'KIMI_WEB_TOKEN' => @token
-    }
-    accumulated = +''
-    Open3.popen3(env, 'python3', script, 'prompt', session_id, text,
-                 '--wait', '--timeout', timeout.to_s) do |_, stdout, stderr, thread|
-      stdout.each_line do |line|
-        accumulated << line
-        on_chunk&.call(line)
-      end
-      unless thread.value.success?
-        raise "Python fallback error: #{stderr.read.strip}"
-      end
-    end
-    accumulated
+  def cleanup_session(session_id)
+    session_delete(session_id)
+  rescue => e
+    Rails.logger.warn "[KimiWebClient] Failed to delete stuck session #{session_id}: #{e.message}"
   end
 
   def rest_get(path)

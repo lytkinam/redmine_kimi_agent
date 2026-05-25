@@ -5,11 +5,11 @@ class KimiSession < ActiveRecord::Base
   validates :session_id, presence: true
   validates :issue_id,   presence: true
 
-  serialize :result_log, JSON
 
   STATUS_PENDING  = 'pending'
   STATUS_RUNNING  = 'running'
   STATUS_IDLE     = 'idle'
+  STATUS_STOPPED  = 'stopped'
   STATUS_ERROR    = 'error'
   STATUS_DONE     = 'done'
 
